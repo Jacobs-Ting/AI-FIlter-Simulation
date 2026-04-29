@@ -13,8 +13,6 @@ COLOR_BG_MAIN    = "#0b162d"   # 網頁主背景
 COLOR_BG_CARD    = "#152238"   # 面板卡片背景
 COLOR_ACCENT     = "#D4AF37"   # 皇家金 (UI 強調色)
 COLOR_TEXT_NM    = "#E0E0E0"   # 一般文字
-
-# [NEW] 專業圖表專用色票
 COLOR_PLOT_BG    = "#0A122A"   # 圖表極深軍藍背景 (營造暗室效果)
 COLOR_GRID       = "#3A4B66"   # 淡淡的網格線
 COLOR_S21_NEON   = "#00FFC8"   # S21: 霓虹青 (Vibrant Teal)
@@ -69,7 +67,7 @@ CIS_DB = {
 CAP_VENDORS = ["Any"] + sorted(list(set([v["mfg"] for v in CIS_DB["CAPS"].values()])))
 IND_VENDORS = ["Any"] + sorted(list(set([v["mfg"] for v in CIS_DB["INDS"].values()])))
 
-# === 狀態初始化 ===
+# === 狀態初始化 (Session State) ===
 if 'ladder' not in st.session_state:
     st.session_state.ladder = [
         {"topo": "Shunt (||)", "type": "Capacitor (C)", "val": 1.2},
@@ -130,6 +128,106 @@ def calc_srf(val, ctype, L_Cp, C_ESL):
         return f"<span class='srf-text'>{txt}</span>"
     except: return "<span class='srf-bypass'>--</span>"
 
+# =====================================================================
+# 🧩 [NEW] 互動式拓樸生成器模組化 (Reusable Topology Plotter)
+# =====================================================================
+def create_topology_fig(ladder_data, L_Cp_val, C_ESL_val):
+    fig_topo = go.Figure()
+    x_cursor = 1       
+    nodes_x = [0]      
+    nodes_y = [1]      
+    
+    for i, stg in enumerate(ladder_data):
+        if stg["val"] == 0: 
+            continue 
+            
+        is_cap = "Capacitor" in stg["type"]
+        unit = "pF" if is_cap else "nH"
+        comp_label = f"{'C' if is_cap else 'L'}{i+1}"
+        
+        try:
+            if not is_cap: srf = 1/(2*np.pi*np.sqrt(stg["val"]*1e-9*L_Cp_val*1e-12))
+            else: srf = 1/(2*np.pi*np.sqrt(stg["val"]*1e-12*C_ESL_val*1e-9))
+            srf_str = f"{srf/1e9:.2f} GHz" if srf>1e9 else f"{srf/1e6:.0f} MHz"
+        except:
+            srf_str = "--"
+
+        hover_html = (
+            f"<b>Stage {i+1} ({stg['topo']})</b><br>"
+            f"Component: {stg['type']}<br>"
+            f"Value: {stg['val']} {unit}<br>"
+            f"<b>SRF: <span style='color:#32CD32'>{srf_str}</span></b>"
+        )
+
+        if "Series" in stg["topo"]:
+            # 畫出 Series 元件的方塊
+            fig_topo.add_trace(go.Scatter(
+                x=[x_cursor], y=[1], mode='markers+text',
+                marker=dict(symbol='square', size=35, color=COLOR_BG_CARD, 
+                            line=dict(color=COLOR_S21_NEON, width=2)),
+                text=f"<b>{comp_label}</b>", textfont=dict(color=COLOR_TEXT_NM, size=12),
+                hovertemplate=hover_html + "<extra></extra>",
+                showlegend=False
+            ))
+            
+            # 🔥 [關鍵修復] 讓傳輸線在元件的左右兩側邊緣斷開！
+            # 透過插入 None，強制打斷線條，避免穿透方塊中心
+            nodes_x.extend([x_cursor - 0.18, None, x_cursor + 0.18])
+            nodes_y.extend([1, None, 1])
+            
+            x_cursor += 1.5
+
+        elif "Shunt" in stg["topo"]:
+            # 畫出垂直連接線
+            fig_topo.add_trace(go.Scatter(
+                x=[x_cursor, x_cursor], y=[1, 0], mode='lines',
+                line=dict(color=COLOR_TEXT_NM, width=2), hoverinfo='skip', showlegend=False
+            ))
+            # 畫出 Shunt 元件的方塊
+            fig_topo.add_trace(go.Scatter(
+                x=[x_cursor], y=[0.5], mode='markers+text',
+                marker=dict(symbol='square', size=35, color=COLOR_BG_CARD, 
+                            line=dict(color=COLOR_S11_AMBER, width=2)),
+                text=f"<b>{comp_label}</b>", textfont=dict(color=COLOR_TEXT_NM, size=12),
+                hovertemplate=hover_html + "<extra></extra>",
+                showlegend=False
+            ))
+            # 畫出接地符號 (GND)
+            fig_topo.add_trace(go.Scatter(
+                x=[x_cursor-0.2, x_cursor+0.2, None, x_cursor-0.1, x_cursor+0.1, None, x_cursor-0.05, x_cursor+0.05],
+                y=[0, 0, None, -0.1, -0.1, None, -0.2, -0.2],
+                mode='lines', line=dict(color=COLOR_TEXT_NM, width=2), hoverinfo='skip', showlegend=False
+            ))
+            
+            # 並聯元件不需要打斷主傳輸線，只需加上打點即可
+            nodes_x.append(x_cursor)
+            nodes_y.append(1)
+            
+            x_cursor += 1.5
+
+    # 結尾的傳輸線節點
+    nodes_x.append(x_cursor)
+    nodes_y.append(1)
+
+    # 畫出頂部的傳輸主線 (Transmission Line)
+    fig_topo.add_trace(go.Scatter(
+        x=nodes_x, y=nodes_y, mode='lines',
+        line=dict(color=COLOR_TEXT_NM, width=2),
+        hoverinfo='skip', showlegend=False
+    ))
+
+    # 加入 IN / OUT 標示
+    fig_topo.add_annotation(x=0, y=1.2, text="<b>IN</b>", showarrow=False, font=dict(color=COLOR_ACCENT, size=12))
+    fig_topo.add_annotation(x=x_cursor, y=1.2, text="<b>OUT</b>", showarrow=False, font=dict(color=COLOR_ACCENT, size=12))
+
+    fig_topo.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(showgrid=False, zeroline=False, visible=False, range=[-0.5, x_cursor + 0.5]),
+        yaxis=dict(showgrid=False, zeroline=False, visible=False, range=[-0.4, 1.5])
+    )
+    return fig_topo
+
 # === 側邊欄 (Sidebar) ===
 with st.sidebar:
     st.title("📡 RF Designer Pro")
@@ -187,6 +285,13 @@ if app_mode == "🪜 Custom Ladder":
             z, _ = get_Z_raw(t_code, stg["val"], freqs, use_para, L_Q, L_Cp, C_Q, C_ESL)
             if "Shunt" in stg["topo"]: m_tot = m_tot @ shunt_mat(1/(z+1e-18))
             else: m_tot = m_tot @ get_mat(z, 'series')
+
+    # 在 Custom Ladder 模式下，保持拓樸圖渲染在下方 (稍寬)
+    st.markdown("---")
+    st.subheader("🧠 Interactive Topology Architecture")
+    fig_topo_main = create_topology_fig(st.session_state.ladder, L_Cp, C_ESL)
+    fig_topo_main.update_layout(height=250, margin=dict(l=20, r=20, t=40, b=20))
+    st.plotly_chart(fig_topo_main, use_container_width=True)
 
 # ---------------------------------------------------------
 # Mode 2: T-Notch Filter
@@ -318,9 +423,10 @@ elif app_mode == "🤖 AI Auto-Design":
                         st.session_state.ladder[2] = {"topo": "Shunt (||)", "type": "Capacitor (C)", "val": c3}
                         for i in range(3,6): st.session_state.ladder[i]["val"] = 0.0
 
+    # === [LAYOUT CHANGE] 將拓樸圖移至 BOM 欄位內 ===
     with col_bom:
         if st.session_state.ai_results is None:
-            st.info("👈 Run AI Optimization to generate BOM.")
+            st.info("👈 Run AI Optimization to generate BOM & Topology.")
         else:
             res = st.session_state.ai_results
             st.success(f"✅ Optimization Complete! (Cost Score: {res['score']:.1f})")
@@ -340,6 +446,15 @@ elif app_mode == "🤖 AI Auto-Design":
             csv = df_bom.to_csv(index=False).encode('utf-8-sig')
             st.download_button(label="📥 Download BOM (.CSV)", data=csv, file_name='filter_bom.csv', mime='text/csv')
 
+            # --- [NEW] 將縮小版的拓樸圖渲染在按鈕正下方 ---
+            st.markdown("---")
+            st.markdown("##### 🧠 Active Topology")
+            fig_topo_ai = create_topology_fig(st.session_state.ladder, L_Cp, C_ESL)
+            # 調整 height 與 margin 讓它完美塞進這個右側欄位中
+            fig_topo_ai.update_layout(height=200, margin=dict(l=10, r=10, t=30, b=10))
+            st.plotly_chart(fig_topo_ai, use_container_width=True)
+
+    # AI 模式運算邏輯
     if st.session_state.ai_results is not None:
         res = st.session_state.ai_results
         m_tot = np.zeros((int(f_pts),2,2),dtype=complex); m_tot[:,0,0]=1; m_tot[:,1,1]=1
@@ -359,10 +474,8 @@ if m_tot is not None:
     st.markdown("---")
     st.subheader(f"📈 Simulation Response: {app_mode.split()[1]}")
     
-    # 建立雙 Y 軸圖表
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # --- [風格優化] S21: 霓虹青, 加粗實線 ---
     fig.add_trace(
         go.Scatter(x=freqs/1e6, y=s21_db, name="S21 (Trans)",
                    line=dict(color=COLOR_S21_NEON, width=2.5),
@@ -370,7 +483,6 @@ if m_tot is not None:
         secondary_y=False,
     )
     
-    # --- [風格優化] S11: 琥珀金, 精緻虛線 ---
     fig.add_trace(
         go.Scatter(x=freqs/1e6, y=s11_db, name="S11 (Refl)",
                    line=dict(color=COLOR_S11_AMBER, width=2.0, dash='5px, 3px'), 
@@ -378,7 +490,6 @@ if m_tot is not None:
         secondary_y=False,
     )
     
-    # Group Delay 繪製
     if show_gd:
         fig.add_trace(
             go.Scatter(x=freqs/1e6, y=gd, name="Group Delay",
@@ -388,14 +499,13 @@ if m_tot is not None:
             secondary_y=True,
         )
 
-    # --- [背景與排版優化] 深度海洋風格 ---
     fig.update_layout(
-        paper_bgcolor=COLOR_PLOT_BG, # 外圍底色
-        plot_bgcolor=COLOR_PLOT_BG,  # 繪圖區底色
+        paper_bgcolor=COLOR_PLOT_BG, 
+        plot_bgcolor=COLOR_PLOT_BG,  
         font=dict(color=COLOR_TEXT_NM, family="Segoe UI, Arial, sans-serif"),
-        hovermode="x unified",       # 十字游標統一顯示
+        hovermode="x unified",       
         hoverlabel=dict(
-            bgcolor=COLOR_BG_CARD,   # 懸停標籤底色
+            bgcolor=COLOR_BG_CARD,   
             font_size=13,
             font_family="Consolas, monospace"
         ),
@@ -403,7 +513,7 @@ if m_tot is not None:
             orientation="h",
             yanchor="bottom", y=1.02,
             xanchor="right", x=1,
-            bgcolor='rgba(21, 34, 56, 0.8)', # 帶一點透明度的圖例背景
+            bgcolor='rgba(21, 34, 56, 0.8)', 
             bordercolor=COLOR_GRID,
             borderwidth=1,
             font=dict(size=11)
@@ -411,7 +521,6 @@ if m_tot is not None:
         margin=dict(l=40, r=40, t=40, b=40)
     )
     
-    # --- 座標軸網格線與外框樣式 ---
     fig.update_xaxes(title_text="Frequency (MHz)", 
                      showgrid=True, gridcolor=COLOR_GRID, gridwidth=0.5, 
                      zeroline=False, 
@@ -428,10 +537,8 @@ if m_tot is not None:
                          showgrid=False, zeroline=False, 
                          secondary_y=True)
 
-    # 渲染圖表
     st.plotly_chart(fig, use_container_width=True)
 
-    # 產生 S2P 並提供下載
     s2p_str = "# Hz S RI R 50\n"
     for i in range(len(freqs)):
         s2p_str += f"{freqs[i]:.0f} {s11[i].real:.6f} {s11[i].imag:.6f} {s21[i].real:.6f} {s21[i].imag:.6f} {s21[i].real:.6f} {s21[i].imag:.6f} {s11[i].real:.6f} {s11[i].imag:.6f}\n"
