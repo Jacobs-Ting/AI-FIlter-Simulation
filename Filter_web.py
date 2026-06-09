@@ -231,13 +231,54 @@ if app_mode == "🪜 Custom Ladder":
     st.plotly_chart(fig_topo_main, use_container_width=True)
 
 # ---------------------------------------------------------
-# Mode 2: T-Notch Filter
+# Mode 2: T-Notch Filter (滿血復活版)
 # ---------------------------------------------------------
 elif app_mode == "🎛️ T-Notch Filter":
     st.header("🎛️ T-Notch Filter Configuration")
     
-    # 省略了 T-notch 細節以集中火力在 AI 模式
-    st.info("T-Notch filter rendering available in main branch.")
+    h_cols = st.columns([2, 2, 2, 2])
+    for col, text in zip(h_cols, ["Position", "Component", "Value", "SRF (Resonance)"]):
+        col.markdown(f"**{text}**")
+        
+    def create_notch_row(key_name, label):
+        c = st.columns([2, 2, 2, 2])
+        c[0].markdown(f"**{label}**")
+        state = st.session_state.notch[key_name]
+        ctype = c[1].selectbox("Type", ["Capacitor (C)", "Inductor (L)"], index=0 if state["type"]=="Capacitor (C)" else 1, key=f"n_type_{key_name}", label_visibility="collapsed")
+        val = c[2].number_input("Val", value=state["val"], step=0.1, min_value=0.0, format="%.2f", key=f"n_val_{key_name}", label_visibility="collapsed")
+        st.session_state.notch[key_name] = {"type": ctype, "val": val}
+        c[3].markdown(calc_srf(val, ctype, L_Cp, C_ESL), unsafe_allow_html=True)
+        return {"type": ctype, "val": val}
+
+    cfg = [("in_match", "1. In Match (Shunt)"), ("s1", "2. Series 1 (Series)"), ("s2", "3. Series 2 (Series)"),
+           ("leg_a", "4. Notch Leg A (Shunt)"), ("leg_b", "5. Notch Leg B (Shunt)"), ("out_match", "6. Out Match (Shunt)")]
+    
+    n_res = {}
+    for k, lbl in cfg: n_res[k] = create_notch_row(k, lbl)
+
+    # 計算 T-Notch 的傳輸矩陣
+    m_tot = np.zeros((int(f_pts),2,2),dtype=complex); m_tot[:,0,0]=1; m_tot[:,1,1]=1
+    
+    def calc_notch_z(key, is_shunt, current_m):
+        v = n_res[key]["val"]
+        if v > 0:
+            tc = "C" if "Capacitor" in n_res[key]["type"] else "L"
+            z, _ = get_Z_raw(tc, v, freqs, use_para, L_Q, L_Cp, C_Q, C_ESL)
+            return current_m @ (shunt_mat(1/(z+1e-18)) if is_shunt else get_mat(z, 'series'))
+        return current_m
+
+    m_tot = calc_notch_z("in_match", True, m_tot)
+    m_tot = calc_notch_z("s1", False, m_tot)
+    
+    va, vb = n_res["leg_a"]["val"], n_res["leg_b"]["val"]
+    if va > 0 or vb > 0:
+        za, zb = np.zeros_like(freqs, dtype=complex), np.zeros_like(freqs, dtype=complex)
+        if va>0: za, _ = get_Z_raw("C" if "Capacitor" in n_res["leg_a"]["type"] else "L", va, freqs, use_para, L_Q, L_Cp, C_Q, C_ESL)
+        if vb>0: zb, _ = get_Z_raw("C" if "Capacitor" in n_res["leg_b"]["type"] else "L", vb, freqs, use_para, L_Q, L_Cp, C_Q, C_ESL)
+        m_tot = m_tot @ shunt_mat(1/(za+zb+1e-18))
+        
+    m_tot = calc_notch_z("s2", False, m_tot)
+    m_tot = calc_notch_z("out_match", True, m_tot)
 
 # ---------------------------------------------------------
 # Mode 3: AI Auto-Design
